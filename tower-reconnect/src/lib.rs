@@ -4,16 +4,17 @@ extern crate log;
 extern crate tower_service;
 
 use futures::{Future, Async, Poll};
-use tower_service::{Service, NewService};
+use tower_service::{Service, MakeService};
 
 use std::{error, fmt};
 
-pub struct Reconnect<T, Request>
+pub struct Reconnect<T, Ctx, Request>
 where
-    T: NewService<Request>,
+    T: MakeService<Ctx, Request>,
 {
-    new_service: T,
-    state: State<T, Request>,
+    context: Ctx,
+    mk_service: T,
+    state: State<T::Future, T::Service>,
 }
 
 #[derive(Debug)]
@@ -23,47 +24,47 @@ pub enum Error<T, U> {
     NotReady,
 }
 
-pub struct ResponseFuture<T, Request>
+pub struct ResponseFuture<T, Ctx, Request>
 where
     // TODO:
     // This struct should just be generic over the response future, but
     // doing so would require changing the future's error type
-    T: NewService<Request>,
+    T: MakeService<Ctx, Request>,
 {
     inner: Option<<T::Service as Service<Request>>::Future>,
 }
 
 #[derive(Debug)]
-enum State<T, Request>
-where
-    T: NewService<Request>
-{
+enum State<F, S> {
     Idle,
-    Connecting(T::Future),
-    Connected(T::Service),
+    Connecting(F),
+    Connected(S),
 }
 
 // ===== impl Reconnect =====
 
-impl<T, Request> Reconnect<T, Request>
+impl<T, Ctx, Request> Reconnect<T, Ctx, Request>
 where
-    T: NewService<Request>,
+    T: MakeService<Ctx, Request>,
+    Ctx: Clone,
 {
-    pub fn new(new_service: T) -> Self {
+    pub fn new(mk_service: T, context: Ctx) -> Self {
         Reconnect {
-            new_service,
+            context,
+            mk_service,
             state: State::Idle,
         }
     }
 }
 
-impl<T, Request> Service<Request> for Reconnect<T, Request>
+impl<T, Ctx, Request> Service<Request> for Reconnect<T, Ctx, Request>
 where
-    T: NewService<Request>
+    T: MakeService<Ctx, Request>,
+    Ctx: Clone,
 {
     type Response = T::Response;
-    type Error = Error<T::Error, T::InitError>;
-    type Future = ResponseFuture<T, Request>;
+    type Error = Error<T::Error, T::MakeError>;
+    type Future = ResponseFuture<T, Ctx, Request>;
 
     fn poll_ready(&mut self) -> Poll<(), Self::Error> {
         use self::State::*;
@@ -75,7 +76,19 @@ where
             match self.state {
                 Idle => {
                     trace!("poll_ready; idle");
-                    let fut = self.new_service.new_service();
+                    match self.mk_service.poll_ready() {
+                        Ok(Async::Ready(())) => (),
+                        Ok(Async::NotReady) => {
+                            trace!("poll_ready; MakeService not ready");
+                            return Ok(Async::NotReady);
+                        }
+                        Err(e) => {
+                            trace!("poll_ready; MakeService error");
+                            return Err(Error::Connect(e));
+                        }
+                    }
+
+                    let fut = self.mk_service.make_service(self.context.clone());
                     self.state = Connecting(fut);
                     continue;
                 }
@@ -138,16 +151,18 @@ where
     }
 }
 
-impl<T, Request> fmt::Debug for Reconnect<T, Request>
+impl<T, Ctx, Request> fmt::Debug for Reconnect<T, Ctx, Request>
 where
-    T: NewService<Request> + fmt::Debug,
+    T: MakeService<Ctx, Request> + fmt::Debug,
     T::Future: fmt::Debug,
     T::Service: fmt::Debug,
+    Ctx: fmt::Debug,
     Request: fmt::Debug,
 {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         fmt.debug_struct("Reconnect")
-            .field("new_service", &self.new_service)
+            .field("context", &self.context)
+            .field("mk_service", &self.mk_service)
             .field("state", &self.state)
             .finish()
     }
@@ -155,12 +170,12 @@ where
 
 // ===== impl ResponseFuture =====
 
-impl<T, Request> Future for ResponseFuture<T, Request>
+impl<T, Ctx, Request> Future for ResponseFuture<T, Ctx, Request>
 where
-    T: NewService<Request>,
+    T: MakeService<Ctx, Request>,
 {
     type Item = T::Response;
-    type Error = Error<T::Error, T::InitError>;
+    type Error = Error<T::Error, T::MakeError>;
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         trace!("poll response");
