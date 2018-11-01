@@ -1,0 +1,1 @@
+initSidebarItems({"enum":[["Error","Error produced by the `Router` service"]],"struct":[["ResponseFuture",""],["Router","Routes requests to an inner service based on the request."]],"trait":[["Recognize","Matches the request with a route"]]});

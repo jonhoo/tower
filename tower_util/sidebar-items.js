@@ -1,0 +1,1 @@
+initSidebarItems({"mod":[["boxed","Trait object `Service` instances"],["either","Contains `EitherService` and related types and functions."],["ext","Combinators for working with `Service`s"],["option","Contains `OptionService` and related types and functions."]],"struct":[["NewServiceFn","A `NewService` implemented by a closure."]]});
