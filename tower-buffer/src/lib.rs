@@ -12,6 +12,7 @@
 #[macro_use]
 extern crate futures;
 extern crate tower_service;
+extern crate tokio_executor;
 extern crate tower_direct_service;
 
 use futures::future::Executor;
@@ -19,6 +20,7 @@ use futures::sync::oneshot;
 use futures::sync::mpsc::{self, UnboundedSender, UnboundedReceiver};
 use futures::{Async, Future, Poll, Stream};
 use std::marker::PhantomData;
+use tokio_executor::DefaultExecutor;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -81,16 +83,34 @@ where
     }
 }
 
-/// A wrapper that exposes a `Service` (which does not need to be driven) as a `DirectService` so
-/// that a construct that is *able* to take a `DirectService` can also take instances of
-/// `Service`.
-pub struct DirectedService<T, Request>
-where
-    T: Service<Request>,
-{
-    inner: T,
-    _marker: PhantomData<Request>,
+mod sealed {
+    use super::*;
+
+    /// A wrapper that exposes a `Service` (which does not need to be driven) as a `DirectService` so
+    /// that a construct that is *able* to take a `DirectService` can also take instances of
+    /// `Service`.
+    pub struct DirectedService<T, Request>
+    where
+        T: Service<Request>,
+    {
+        pub(crate) inner: T,
+        pub(crate) _marker: PhantomData<Request>,
+    }
+
+    /// Task that handles processing the buffer. This type should not be used
+    /// directly, instead `Buffer` requires an `Executor` that can accept this task.
+    pub struct Worker<T, Request>
+    where
+        T: DirectService<Request>,
+    {
+        pub(crate) current_message: Option<Message<Request, T::Future>>,
+        pub(crate) rx: UnboundedReceiver<Message<Request, T::Future>>,
+        pub(crate) service: T,
+        pub(crate) finish: bool,
+        pub(crate) state: Arc<State>,
+    }
 }
+use sealed::{DirectedService, Worker};
 
 impl<T, Request> DirectService<Request> for DirectedService<T, Request>
 where
@@ -119,17 +139,17 @@ where
     }
 }
 
-/// Task that handles processing the buffer. This type should not be used
-/// directly, instead `Buffer` requires an `Executor` that can accept this task.
-pub struct Worker<T, Request>
+/// This trait allows you to use either Tokio's threaded runtime's executor or the `current_thread`
+/// runtime's executor depending on if `T` is `Send` or `!Send`.
+pub trait WorkerExecutor<T, Request>: Executor<sealed::Worker<T, Request>>
 where
     T: DirectService<Request>,
 {
-    current_message: Option<Message<Request, T::Future>>,
-    rx: UnboundedReceiver<Message<Request, T::Future>>,
-    service: T,
-    finish: bool,
-    state: Arc<State>,
+}
+
+impl<T, Request, E: Executor<sealed::Worker<T, Request>>> WorkerExecutor<T, Request> for E where
+    T: DirectService<Request>
+{
 }
 
 /// Error produced when spawning the worker fails
@@ -161,12 +181,25 @@ where
 {
     /// Creates a new `Buffer` wrapping `service`.
     ///
+    /// The default Tokio executor is used to run the given service, which means that this method
+    /// must be called while on the Tokio runtime.
+    pub fn new(service: T) -> Result<Self, SpawnError<T>>
+    where
+        T: Send + 'static,
+        T::Future: Send,
+        Request: Send + 'static,
+    {
+        Self::with_executor(service, &DefaultExecutor::current())
+    }
+
+    /// Creates a new `Buffer` wrapping `service`.
+    ///
     /// `executor` is used to spawn a new `Worker` task that is dedicated to
     /// draining the buffer and dispatching the requests to the internal
     /// service.
-    pub fn new<E>(service: T, executor: &E) -> Result<Self, SpawnError<T>>
+    pub fn with_executor<E>(service: T, executor: &E) -> Result<Self, SpawnError<T>>
     where
-        E: Executor<Worker<DirectedService<T, Request>, Request>>,
+        E: WorkerExecutor<DirectedService<T, Request>, Request>,
     {
         let (tx, rx) = mpsc::unbounded();
 
@@ -196,19 +229,35 @@ where
     }
 }
 
-impl<T, Request> Buffer<DirectServiceRef<T>, Request>
+impl<T, Request> DirectBuffer<T, Request>
 where
     T: DirectService<Request>,
 {
     /// Creates a new `Buffer` wrapping the given directly driven `service`.
     ///
+    /// The default Tokio executor is used to run the given service, which means that this method
+    /// must be called while on the Tokio runtime.
+    pub fn new_direct<E>(service: T) -> Result<Self, SpawnError<T>>
+    where
+        T: Send + 'static,
+        T::Future: Send,
+        Request: Send + 'static,
+    {
+        Self::direct_with_executor(service, &DefaultExecutor::current())
+    }
+
+    /// Creates a new `Buffer` wrapping `service`.
+    ///
     /// `executor` is used to spawn a new `Worker` task that is dedicated to
     /// draining the buffer and dispatching the requests to the internal
     /// service.
-    pub fn new_direct<E>(service: T, executor: &E) -> Result<Self, SpawnError<T>>
+    pub fn direct_with_executor<E>(service: T, executor: &E) -> Result<Self, SpawnError<T>>
     where
-        E: Executor<Worker<T, Request>>,
+        E: WorkerExecutor<T, Request>,
     {
+        // NOTE: We can't deduplicate this with `Buffer::with_executor`, beacuse we'd end up
+        // with `DirectServiceRef<DirectedService<T>>`, which is just silly.
+
         let (tx, rx) = mpsc::unbounded();
 
         let state = Arc::new(State {
