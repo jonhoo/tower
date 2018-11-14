@@ -201,7 +201,12 @@ where
                         }
                     }
                 }
-                Async::Ready(None) | Async::NotReady => {
+                Async::NotReady => {
+                    // no more requests for now, so we might as well flush
+                    self.flush = !self.accum.is_empty();
+                    break;
+                }
+                Async::Ready(None) => {
                     // there are no more requests for now
                     break;
                 }
