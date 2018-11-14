@@ -2,6 +2,7 @@
 
 members = [
   "tower-balance",
+  "tower-batcher",
   "tower-buffer",
   "tower-direct-service",
   "tower-discover",

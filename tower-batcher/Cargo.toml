@@ -1,0 +1,11 @@
+[package]
+name = "tower-batcher"
+version = "0.1.0"
+authors = ["Jon Gjengset <jon@thesquareplanet.com>"]
+publish = false
+
+[dependencies]
+futures = "0.1"
+tower-service = { version = "0.1", path = "../tower-service" }
+tower-direct-service = { version = "0.1", path = "../tower-direct-service" }
+streamunordered = "0.4"
