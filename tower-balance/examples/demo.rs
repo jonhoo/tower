@@ -1,6 +1,5 @@
 //! Exercises load balancers with mocked services.
 
-use env_logger;
 use futures::{future, stream, Async, Future, Poll, Stream};
 use hdrsample::Histogram;
 use rand::{self, Rng};
@@ -38,7 +37,7 @@ struct Summary {
 }
 
 fn main() {
-    env_logger::init();
+    tracing::subscriber::set_global_default(tracing_fmt::default::Format::default()).unwrap();
 
     println!("REQUESTS={}", REQUESTS);
     println!("CONCURRENCY={}", CONCURRENCY);
@@ -131,12 +130,13 @@ fn gen_disco() -> impl Discover<
     )
 }
 
-fn run<D>(name: &'static str, lb: lb::p2c::Balance<D>) -> impl Future<Item = (), Error = ()>
+fn run<D>(name: &'static str, lb: lb::p2c::Balance<D, Req>) -> impl Future<Item = (), Error = ()>
 where
     D: Discover + Send + 'static,
     D::Error: Into<Error>,
-    D::Key: Send,
-    D::Service: Service<Req, Response = Rsp, Error = Error> + load::Load + Send,
+    D::Key: Clone + Send,
+    D::Service: Service<Req, Response = Rsp> + load::Load + Send,
+    <D::Service as Service<Req>>::Error: Into<Error>,
     <D::Service as Service<Req>>::Future: Send,
     <D::Service as load::Load>::Metric: std::fmt::Debug,
 {
